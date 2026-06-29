@@ -3,6 +3,8 @@
 Usage:
     python main.py "https://www.youtube.com/watch?v=..." \
         --num-clips 3 --aspect-ratio 9:16
+        
+    python main.py "https://youtube.com/playlist?list=..." "/path/to/local/folder"
 """
 import argparse
 import json
@@ -16,11 +18,13 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from shorts_generator import generate_shorts
+from shorts_generator.batch import process_batch
+from shorts_generator.review import cli_human_review_callback
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="AI YouTube Shorts Generator")
-    parser.add_argument("url", help="YouTube URL, file:// URL, or local file path")
+    parser.add_argument("urls", nargs="+", help="YouTube URLs, file:// URLs, local file paths, playlists, or folders")
     parser.add_argument(
         "--mode",
         choices=["api", "local"],
@@ -31,40 +35,44 @@ def main() -> int:
     parser.add_argument("--aspect-ratio", default="9:16", help="Output aspect ratio (default: 9:16)")
     parser.add_argument("--format", default="720", help="Source download resolution: 360 / 480 / 720 / 1080 (default: 720)")
     parser.add_argument("--language", default=None, help="Force Whisper language code, e.g. 'en' (default: auto-detect)")
+    parser.add_argument("--profile", default="youtube", choices=["youtube", "tiktok", "instagram"], help="Export profile to format for a specific platform")
     parser.add_argument("--output-json", default=None, help="Write the full result JSON to this path")
+    parser.add_argument("--human-review", action="store_true", help="Pause pipeline to allow human review of clips before rendering")
     args = parser.parse_args()
 
     try:
-        result = generate_shorts(
-            youtube_url=args.url,
+        from shorts_generator.config import LOCAL_OUTPUT_DIR
+        out_dir_base = LOCAL_OUTPUT_DIR if args.mode == "local" else None
+        
+        callback = cli_human_review_callback if args.human_review else None
+        
+        report = process_batch(
+            inputs=args.urls,
             num_clips=args.num_clips,
             aspect_ratio=args.aspect_ratio,
             download_format=args.format,
             language=args.language,
             mode=args.mode,
+            profile=args.profile,
+            out_dir_base=out_dir_base,
+            review_callback=callback
         )
     except Exception as e:
         print(f"\nFAILED: {e}", file=sys.stderr)
         return 1
 
     print("\n" + "=" * 72)
-    print(f"Mode:          {result.mode}")
-    print(f"Source video:  {result.source_video_url}")
-    print(f"Highlights:    Generated and kept top {len(result.shorts)}")
+    print(f"Batch Processing Complete")
+    print(f"Total Targets: {report['total_targets']}")
+    print(f"Success:       {report['success']}")
+    print(f"Failed:        {report['failed']}")
+    print(f"Time Taken:    {report['time_taken_seconds']}s")
     print("=" * 72)
-    for i, s in enumerate(result.shorts, 1):
-        print(f"\n#{i}  score={s.score}  {s.start_time:.1f}s → {s.end_time:.1f}s")
-        print(f"     title:  {s.title}")
-        print(f"     hook:   {s.hook_sentence}")
-        if s.clip_url:
-            print(f"     clip:   {s.clip_url}")
-        else:
-            print(f"     clip:   FAILED ({s.error})")
 
     if args.output_json:
-        with open(args.output_json, "w") as f:
-            f.write(result.model_dump_json(indent=2))
-        print(f"\nFull JSON written to {args.output_json}")
+        with open(args.output_json, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        print(f"\nFull batch JSON written to {args.output_json}")
 
     return 0
 

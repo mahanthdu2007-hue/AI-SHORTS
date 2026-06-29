@@ -91,6 +91,7 @@ class Highlight(BaseModel):
     clip_url: Optional[str] = None
     error: Optional[str] = None
     metadata: Optional[ShortMetadata] = Field(default=None, description="Generated metadata for the Short")
+    quality_report: Optional[dict] = Field(default=None, description="Final quality diagnostics report")
 
 
 class Result(BaseModel):
