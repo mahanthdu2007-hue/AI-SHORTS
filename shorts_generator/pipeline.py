@@ -6,12 +6,9 @@ import concurrent.futures
 from typing import Optional
 from tqdm import tqdm
 
-from .models import Result, Transcript, Highlight
+from .models import Result, Transcript
 from .providers import get_provider, get_subtitle_renderer
-from .scenes import detect_scenes
 from .highlights import get_highlights
-from .profiles import get_profile
-from .analyzer import analyze_quality, print_scorecard
 from .logger import get_logger
 
 logger = get_logger("pipeline")
@@ -24,39 +21,12 @@ def generate_shorts(
     download_format: str = "720",
     language: Optional[str] = None,
     mode: str = "api",
-    profile: str = "youtube",
     out_dir_override: Optional[str] = None,
     review_callback=None,
 ) -> Result:
-    """Run the core ViralForge pipeline to generate Shorts from a source video.
-    
-    This function orchestrates the entire process:
-    1. Downloads the source video (or processes a local file).
-    2. Transcribes the audio using Whisper.
-    3. Identifies highlights via the LLM provider.
-    4. Applies scene-aware boundary snapping and padding.
-    5. Optionally waits for human review.
-    6. Renders the final clips using FFmpeg (audio mastering, cropping, subtitles).
-    
-    Args:
-        youtube_url: Target URL or local file path.
-        num_clips: Maximum number of clips to generate.
-        aspect_ratio: Target aspect ratio.
-        download_format: Source resolution for download.
-        language: Forced language code (optional).
-        mode: Processing mode ('api' or 'local').
-        profile: Export profile ('youtube', 'tiktok', etc.).
-        out_dir_override: Custom output directory.
-        review_callback: Callback for human review mode.
-        
-    Returns:
-        A Result object containing the generated Shorts and metadata.
-    """
+    """Run the full pipeline and return a structured Result."""
     time_total_start = time.perf_counter()
     mode = (mode or "api").lower()
-    
-    export_profile = get_profile(profile)
-    logger.info(f"Using export profile: {export_profile.name} (Res: {export_profile.resolution}, FPS: {export_profile.fps})")
     
     logger.info(f"Initializing ViralForge pipeline in {mode.upper()} mode")
     
@@ -113,17 +83,10 @@ def generate_shorts(
     t1 = time.perf_counter()
     logger.info(f"✓ Transcript complete in {t1 - t0:.2f}s")
     
-    # 3.5 Scene Detection
-    logger.info("Starting Scene Detection phase")
-    t0 = time.perf_counter()
-    scenes = detect_scenes(source_path)
-    t1 = time.perf_counter()
-    logger.info(f"✓ Scene Detection complete in {t1 - t0:.2f}s")
-    
     # 4. Highlights
     logger.info("Starting Highlight Generation phase")
     t0 = time.perf_counter()
-    final_clips = get_highlights(transcript, provider, scenes, num_clips=num_clips)
+    final_clips = get_highlights(transcript, provider, num_clips=num_clips)
     if not final_clips:
         raise RuntimeError("Highlight generator returned zero clips.")
     t1 = time.perf_counter()
@@ -145,8 +108,8 @@ def generate_shorts(
     def _render_short(i, short):
         try:
             if mode == "local":
-                out_path = os.path.join(out_dir, f"short_{i:02d}{export_profile.output_suffix}.mp4")
-                cropped_url = crop_clip_fn(source_path, float(short.start_time), float(short.end_time), aspect_ratio, out_path, export_profile)
+                out_path = os.path.join(out_dir, f"short_{i:02d}.mp4")
+                cropped_url = crop_clip_fn(source_path, float(short.start_time), float(short.end_time), aspect_ratio, out_path)
             else:
                 cropped_url = crop_clip_fn(source_path, float(short.start_time), float(short.end_time), aspect_ratio)
                 
@@ -154,8 +117,7 @@ def generate_shorts(
                 cropped_url, 
                 transcript.model_dump(), 
                 cropped_url, 
-                start_time=short.start_time,
-                profile=export_profile
+                start_time=short.start_time
             )
             short.clip_url = subbed_url
             
@@ -164,11 +126,8 @@ def generate_shorts(
                 with open(meta_path, "w", encoding="utf-8") as f:
                     json.dump(short.metadata.model_dump(), f, indent=2)
                     
-        except subprocess.CalledProcessError as e:
-            logger.error(f"FFmpeg rendering failed for Clip {i}: {e}")
-            short.error = f"Render error: {str(e)}"
         except Exception as e:
-            logger.error(f"Unexpected error rendering Clip {i}: {e}", exc_info=True)
+            logger.error(f"Clip {i} failed: {e}")
             short.error = str(e)
         return short
         
@@ -179,14 +138,6 @@ def generate_shorts(
             
     t1 = time.perf_counter()
     logger.info(f"✓ Rendering complete in {t1 - t0:.2f}s")
-    
-    # 7. Quality Analysis (Diagnostics)
-    logger.info("Running Automatic Quality Analyzer...")
-    for i, short in enumerate(final_clips, 1):
-        if not short.error:
-            report = analyze_quality(short, transcript, provider)
-            short.quality_report = report.model_dump()
-            print_scorecard(short, report, i)
     
     time_total_end = time.perf_counter()
     logger.info(f"Pipeline finished successfully in {time_total_end - time_total_start:.2f}s")

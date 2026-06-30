@@ -35,7 +35,6 @@ def main() -> int:
     parser.add_argument("--aspect-ratio", default="9:16", help="Output aspect ratio (default: 9:16)")
     parser.add_argument("--format", default="720", help="Source download resolution: 360 / 480 / 720 / 1080 (default: 720)")
     parser.add_argument("--language", default=None, help="Force Whisper language code, e.g. 'en' (default: auto-detect)")
-    parser.add_argument("--profile", default="youtube", choices=["youtube", "tiktok", "instagram"], help="Export profile to format for a specific platform")
     parser.add_argument("--output-json", default=None, help="Write the full result JSON to this path")
     parser.add_argument("--human-review", action="store_true", help="Pause pipeline to allow human review of clips before rendering")
     args = parser.parse_args()
@@ -53,7 +52,6 @@ def main() -> int:
             download_format=args.format,
             language=args.language,
             mode=args.mode,
-            profile=args.profile,
             out_dir_base=out_dir_base,
             review_callback=callback
         )

@@ -51,14 +51,7 @@ def _extract_playlist_urls(url: str) -> List[str]:
     return urls
 
 def normalize_inputs(inputs: List[str]) -> List[str]:
-    """Normalize a mixed list of URLs, files, and folders into a flat list of processable targets.
-    
-    Args:
-        inputs: List of YouTube URLs, playlist URLs, local file paths, or directory paths.
-        
-    Returns:
-        A flattened list of valid targets (URLs or file paths) ready for processing.
-    """
+    """Normalize a mixed list of URLs, files, and folders into a flat list of processable targets."""
     targets = []
     
     for inp in inputs:
@@ -101,27 +94,10 @@ def process_batch(
     download_format: str = "720",
     language: str = None,
     mode: str = "api",
-    profile: str = "youtube",
     out_dir_base: str = None,
     review_callback=None
 ) -> Dict[str, Any]:
-    """Process a batch of inputs sequentially and aggregate a summary report.
-    
-    Args:
-        inputs: Mixed list of URLs, playlists, or local paths.
-        num_clips: Number of shorts to generate per input.
-        aspect_ratio: Target aspect ratio (e.g. '9:16').
-        download_format: Source resolution (e.g. '720').
-        language: Forced language code for transcription (optional).
-        mode: Processing mode ('api' or 'local').
-        profile: Target export profile (e.g. 'youtube', 'tiktok').
-        out_dir_base: Base directory for local outputs.
-        review_callback: Optional callback for Human Review Mode.
-        
-    Returns:
-        A dictionary containing processing statistics ('success', 'failed', 'total').
-    """
-    logger.info(f"Starting batch process for {len(inputs)} input(s)")
+    """Process a batch of videos sequentially."""
     targets = normalize_inputs(inputs)
     logger.info(f"Normalized {len(inputs)} inputs into {len(targets)} unique targets to process.")
     
@@ -129,8 +105,7 @@ def process_batch(
         "total_targets": len(targets),
         "success": 0,
         "failed": 0,
-        "results": [],
-        "errors": []
+        "results": []
     }
     
     t0 = time.perf_counter()
@@ -140,13 +115,12 @@ def process_batch(
         try:
             # Generate a subfolder name based on video ID or index
             subfolder = None
-            target_out_dir = None
             if out_dir_base:
                 vid_id = extract_youtube_video_id(target)
                 if vid_id:
-                    target_out_dir = os.path.join(out_dir_base, vid_id)
+                    subfolder = os.path.join(out_dir_base, vid_id)
                 else:
-                    target_out_dir = os.path.join(out_dir_base, f"video_{i:03d}")
+                    subfolder = os.path.join(out_dir_base, f"video_{i:03d}")
             
             result = generate_shorts(
                 youtube_url=target,
@@ -155,8 +129,7 @@ def process_batch(
                 download_format=download_format,
                 language=language,
                 mode=mode,
-                profile=profile,
-                out_dir_override=target_out_dir,
+                out_dir_override=subfolder,
                 review_callback=review_callback
             )
             report["success"] += 1
@@ -166,14 +139,14 @@ def process_batch(
                 "clips_generated": len(result.shorts),
                 "source_video": result.source_video_url
             })
-        except (ValueError, IOError) as e:
-            logger.error(f"IO/Validation Error processing {target}: {e}")
-            report["failed"] += 1
-            report["errors"].append({"target": target, "error": str(e)})
         except Exception as e:
-            logger.error(f"Unexpected error processing {target}: {e}", exc_info=True)
+            logger.error(f"Failed to process target {target}: {e}")
             report["failed"] += 1
-            report["errors"].append({"target": target, "error": str(e)})
+            report["results"].append({
+                "target": target,
+                "status": "failed",
+                "error": str(e)
+            })
             
     t1 = time.perf_counter()
     report["time_taken_seconds"] = round(t1 - t0, 2)

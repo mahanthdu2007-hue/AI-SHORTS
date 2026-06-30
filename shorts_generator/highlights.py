@@ -133,41 +133,6 @@ class CoherenceResult(BaseModel):
     new_start_sentence: str = Field(description="The exact verbatim sentence from the transcript where the clip should start.")
     new_end_sentence: str = Field(description="The exact verbatim sentence from the transcript where the clip should end.")
 
-FINAL_REVIEW_PROMPT = """You are a Senior YouTube Shorts Editor performing the final quality assurance review on a generated clip.
-Your goal is to ensure the clip is absolutely perfect before it is exported. 
-Evaluate the clip against these criteria:
-1. Does it start awkwardly? (e.g., mid-sentence, missing context)
-2. Does it end awkwardly? (e.g., cut off before the payoff)
-3. Does it feel incomplete?
-4. Does it contain excessively long pauses or meandering speech?
-5. Does it contain redundant or repeated information?
-
-Decide whether to:
-- "ACCEPT": The clip is great.
-- "REJECT": The clip violates the criteria severely and cannot be salvaged.
-- "MODIFY": The clip is mostly good but needs its boundaries shifted.
-
-If you choose "MODIFY", you MUST provide the exact verbatim `new_start_sentence` and `new_end_sentence` from the provided context, and provide a `new_score`.
-
-Current Clip ({duration:.1f}s):
-{clip_text}
-
-Context Before:
-{context_before}
-
-Context After:
-{context_after}
-
-Respond ONLY with valid JSON matching the schema.
-"""
-
-class FinalReviewResult(BaseModel):
-    decision: str = Field(description="Must be exactly 'ACCEPT', 'REJECT', or 'MODIFY'")
-    reason: str = Field(description="A short 1-sentence explanation of the decision.")
-    new_start_sentence: Optional[str] = Field(None, description="If MODIFY, the exact verbatim sentence to start on.")
-    new_end_sentence: Optional[str] = Field(None, description="If MODIFY, the exact verbatim sentence to end on.")
-    new_score: Optional[int] = Field(None, description="If MODIFY, the new adjusted viral score (0-100).")
-
 METADATA_GENERATION_PROMPT = """You are a YouTube Shorts growth expert.
 Generate the complete metadata package for this Short to maximize reach and engagement.
 
@@ -605,83 +570,10 @@ def optimize_clip_hooks(candidates: List[Highlight], transcript: Transcript) -> 
                         break
                         
         if best_start != c.start_time:
-            logger.info(f"Hook Optimized for '{c.title}': shifted start from {c.start_time:.1f} to {best_start:.1f} to match hook '{c.hook_sentence}'")
+            logger.info(f"Hook Optimized for '{c.title}': shifted start from {c.start_time:.1f} to {best_start:.1f}")
             c.start_time = best_start
             
     return candidates
-
-
-def human_editing_pass(candidates: List[Highlight], transcript: Transcript, provider: BaseLLMProvider) -> List[Highlight]:
-    """Simulate a Senior Editor's final QA review on each clip."""
-    logger.info("Executing Final Human Editing Pass...")
-    import re
-    
-    final_passed_clips = []
-    
-    for c in candidates:
-        clip_segs = [s for s in transcript.segments if s.end >= c.start_time and s.start <= c.end_time]
-        clip_text = " ".join(s.text.strip() for s in clip_segs)
-        
-        before_segs = [s for s in transcript.segments if s.end < c.start_time and s.end >= c.start_time - 60]
-        context_before = " ".join(s.text.strip() for s in before_segs)
-        
-        after_segs = [s for s in transcript.segments if s.start > c.end_time and s.start <= c.end_time + 60]
-        context_after = " ".join(s.text.strip() for s in after_segs)
-        
-        prompt = FINAL_REVIEW_PROMPT.format(
-            duration=c.end_time - c.start_time,
-            clip_text=clip_text,
-            context_before=context_before,
-            context_after=context_after
-        )
-        
-        try:
-            resp_str = provider.generate_json(prompt, schema=FinalReviewResult.model_json_schema())
-            result = FinalReviewResult.model_validate_json(resp_str)
-            
-            logger.info(f"Final Review for '{c.title}': {result.decision} - {result.reason}")
-            
-            if result.decision == "REJECT":
-                continue
-            elif result.decision == "MODIFY":
-                if result.new_score is not None:
-                    c.viral_score = result.new_score
-                    
-                if result.new_start_sentence:
-                    target_clean = re.sub(r'[^\w\s]', '', result.new_start_sentence.lower().strip())
-                    if len(target_clean) > 10:
-                        search_segs = before_segs + clip_segs
-                        for seg in search_segs:
-                            seg_clean = re.sub(r'[^\w\s]', '', seg.text.lower().strip())
-                            if len(seg_clean) > 5 and (seg_clean in target_clean or target_clean in seg_clean):
-                                logger.info(f"Final Review shifted start from {c.start_time:.1f} to {seg.start:.1f}")
-                                c.start_time = seg.start
-                                break
-                                
-                if result.new_end_sentence:
-                    target_clean = re.sub(r'[^\w\s]', '', result.new_end_sentence.lower().strip())
-                    if len(target_clean) > 10:
-                        search_segs = clip_segs + after_segs
-                        for seg in reversed(search_segs):
-                            seg_clean = re.sub(r'[^\w\s]', '', seg.text.lower().strip())
-                            if len(seg_clean) > 5 and (seg_clean in target_clean or target_clean in seg_clean):
-                                logger.info(f"Final Review shifted end from {c.end_time:.1f} to {seg.end:.1f}")
-                                c.end_time = seg.end
-                                break
-                                
-            final_passed_clips.append(c)
-            
-        except Exception as e:
-            logger.warning(f"Failed Final Review for '{c.title}': {e}. Passing clip by default.")
-            final_passed_clips.append(c)
-            
-    # Guarantee at least one clip returns if QA was too aggressive
-    if not final_passed_clips and candidates:
-        logger.warning("Final Review rejected all clips! Rescuing the highest scored clip.")
-        best_clip = max(candidates, key=lambda x: x.viral_score)
-        final_passed_clips.append(best_clip)
-        
-    return final_passed_clips
 
 
 def generate_clip_metadata(candidates: List[Highlight], transcript: Transcript, provider: BaseLLMProvider) -> List[Highlight]:
@@ -711,100 +603,7 @@ def generate_clip_metadata(candidates: List[Highlight], transcript: Transcript, 
     return candidates
 
 
-def apply_professional_padding(candidates: List[Highlight], transcript: Transcript) -> List[Highlight]:
-    """
-    Refine clip boundaries to be professional cuts.
-    Finds the exact first and last word timestamps and pads them.
-    start = first_word.start - 0.15s
-    end = last_word.end + 0.20s
-    """
-    if not candidates:
-        return candidates
-        
-    for c in candidates:
-        first_word_start = None
-        last_word_end = None
-        
-        for seg in transcript.segments:
-            # Check segment overlap
-            if seg.end >= c.start_time and seg.start <= c.end_time:
-                if seg.words:
-                    for w in seg.words:
-                        # Allow a little slop around the strict bounds
-                        if w.start >= c.start_time - 0.5 and w.end <= c.end_time + 0.5:
-                            if first_word_start is None or w.start < first_word_start:
-                                first_word_start = w.start
-                            if last_word_end is None or w.end > last_word_end:
-                                last_word_end = w.end
-        
-        final_start = c.start_time
-        final_end = c.end_time
-        
-        if first_word_start is not None:
-            final_start = max(0.0, first_word_start - 0.15)
-        if last_word_end is not None:
-            final_end = min(transcript.duration, last_word_end + 0.20)
-            
-        if final_start != c.start_time or final_end != c.end_time:
-            logger.info(f"Professional Padding applied to '{c.title}': "
-                        f"{c.start_time:.2f}-{c.end_time:.2f} -> {final_start:.2f}-{final_end:.2f}")
-            c.start_time = final_start
-            c.end_time = final_end
-            
-    return candidates
-
-
-def apply_scene_aware_boundaries(candidates: List[Highlight], scenes: List[Tuple[float, float]]) -> List[Highlight]:
-    """Snap clip boundaries to scene cuts if they are uncomfortably close."""
-    if not scenes:
-        return candidates
-        
-    scene_radius = 1.5  # search radius in seconds
-    
-    for c in candidates:
-        orig_start = c.start_time
-        orig_end = c.end_time
-        
-        # Snap start time: Prefer starting clips AFTER scene changes.
-        # So we look for a scene cut (which is a scene end/start) near c.start_time.
-        # If there's a scene cut within radius, snap start_time to it.
-        # Actually, `scenes` is a list of (start, end). The cuts are basically the `start` (or `end`) values.
-        # Let's collect all cut timestamps.
-        cuts = [s[0] for s in scenes]
-        if scenes:
-            cuts.append(scenes[-1][1])
-            
-        best_start_cut = None
-        min_start_dist = scene_radius
-        for cut in cuts:
-            dist = abs(cut - c.start_time)
-            if dist < min_start_dist:
-                min_start_dist = dist
-                best_start_cut = cut
-                
-        if best_start_cut is not None:
-            logger.info(f"Scene-Aware snapping start for '{c.title}': {c.start_time:.2f} -> {best_start_cut:.2f}")
-            c.start_time = best_start_cut
-            
-        # Snap end time: Prefer ending clips BEFORE major camera transitions.
-        # If there is a scene cut near c.end_time, snap to it.
-        best_end_cut = None
-        min_end_dist = scene_radius
-        for cut in cuts:
-            dist = abs(cut - c.end_time)
-            if dist < min_end_dist:
-                min_end_dist = dist
-                best_end_cut = cut
-                
-        if best_end_cut is not None:
-            # We want to end right before the cut
-            logger.info(f"Scene-Aware snapping end for '{c.title}': {c.end_time:.2f} -> {best_end_cut:.2f}")
-            c.end_time = best_end_cut
-            
-    return candidates
-
-
-def get_highlights(transcript: Transcript, provider: BaseLLMProvider, scenes: List[Tuple[float, float]] = None, num_clips: int = 3) -> List[Highlight]:
+def get_highlights(transcript: Transcript, provider: BaseLLMProvider, num_clips: int = 3) -> List[Highlight]:
     """Execute the full 3-stage AI ranking pipeline."""
     content_info = detect_content_type(transcript, provider)
     logger.info(f"Detected content: {content_info.content_type} (Density: {content_info.density})")
@@ -830,16 +629,6 @@ def get_highlights(transcript: Transcript, provider: BaseLLMProvider, scenes: Li
     
     # Hook Optimization
     final_clips = optimize_clip_hooks(final_clips, transcript)
-    
-    # Final Human Editing Pass (QA)
-    final_clips = human_editing_pass(final_clips, transcript, provider)
-    
-    # Scene-Aware Editing
-    if scenes:
-        final_clips = apply_scene_aware_boundaries(final_clips, scenes)
-    
-    # Professional Padding
-    final_clips = apply_professional_padding(final_clips, transcript)
     
     # Metadata Generation
     final_clips = generate_clip_metadata(final_clips, transcript, provider)
